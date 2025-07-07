@@ -1,0 +1,14 @@
+name = "sublime-packages-discord-bot"
+main = "src/worker.ts"
+compatibility_date = "2024-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+[env.production]
+name = "sublime-packages-discord-bot"
+
+# Environment variables (set these in Cloudflare dashboard or via wrangler secret)
+[vars]
+# These are non-sensitive variables
+DISCORD_APPLICATION_ID = "1391144013045694515"
+
+routes = [{ pattern = "bot.sublimetext.io", custom_domain = true }]

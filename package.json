@@ -1,0 +1,33 @@
+{
+  "name": "sublime-packages-discord-bot-worker",
+  "version": "1.0.0",
+  "description": "Discord bot for searching Sublime Text packages - Cloudflare Worker version",
+  "main": "dist/worker.js",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail",
+    "register-commands": "node scripts/register-commands.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "sublime-text",
+    "packages",
+    "cloudflare",
+    "worker"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord-interactions": "^3.4.0",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240117.0",
+    "@types/node": "^20.10.4",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.24.0"
+  }
+}
