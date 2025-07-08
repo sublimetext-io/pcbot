@@ -10,11 +10,15 @@ const commands = [
     options: [
       {
         name: "query",
-        description: "Package name or search term",
+        description: "Package name or search term (supports author: and label: filters)",
         type: 3, // STRING type
         required: true,
       },
     ],
+  },
+  {
+    name: "help",
+    description: "Show advanced search help and examples",
   },
   {
     name: "stats",

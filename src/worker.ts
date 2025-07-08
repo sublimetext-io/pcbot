@@ -42,6 +42,11 @@ interface DiscordResponse {
         text: string;
       };
       timestamp?: string;
+      author?: {
+        name: string;
+        url: string;
+        icon_url: string;
+      };
     }>;
     flags?: number;
   };
@@ -79,6 +84,7 @@ interface Library {
   description: string;
   issues?: string;
   releases: Release[];
+  last_modified?: string;
 }
 
 interface ChannelData {
@@ -125,6 +131,13 @@ interface Env {
   DISCORD_APPLICATION_ID: string;
 }
 
+// Advanced search filter interface
+interface SearchFilters {
+  author?: string;
+  label?: string;
+  textQuery: string;
+}
+
 class PackageService {
   private static readonly CHANNEL_URL =
     "https://github.com/packagecontrol/thecrawl/releases/download/the-channel/channel.json";
@@ -153,6 +166,73 @@ class PackageService {
     }
   }
 
+  private getLatestRelease(releases: Release[]): Release | null {
+    if (releases.length === 0) return null;
+    
+    // Sort releases by date (newest first)
+    const sortedReleases = releases.sort((a, b) => {
+      const dateA = new Date(a.date).getTime();
+      const dateB = new Date(b.date).getTime();
+      return dateB - dateA;
+    });
+    
+    return sortedReleases[0];
+  }
+
+  parseSearchQuery(query: string): SearchFilters {
+    const filters: SearchFilters = { textQuery: '' };
+    
+    // Regex to match filter patterns like "author:value" or "label:value"
+    const filterRegex = /(\w+):(\S+)/g;
+    let match;
+    let remainingQuery = query;
+    
+    // Extract filters
+    while ((match = filterRegex.exec(query)) !== null) {
+      const [fullMatch, filterType, filterValue] = match;
+      
+      switch (filterType.toLowerCase()) {
+        case 'author':
+          filters.author = filterValue;
+          break;
+        case 'label':
+          filters.label = filterValue;
+          break;
+        // Add more filter types as needed
+      }
+      
+      // Remove the filter from the remaining query
+      remainingQuery = remainingQuery.replace(fullMatch, '').trim();
+    }
+    
+    filters.textQuery = remainingQuery.trim();
+    return filters;
+  }
+
+  private matchesFilters(
+    pkg: Package | Library,
+    filters: SearchFilters
+  ): boolean {
+    // Check author filter
+    if (filters.author) {
+      const authors = Array.isArray(pkg.author) ? pkg.author : [pkg.author];
+      const authorMatch = authors.some(author => 
+        author.toLowerCase().includes(filters.author!.toLowerCase())
+      );
+      if (!authorMatch) return false;
+    }
+
+    // Check label filter (only applicable to packages)
+    if (filters.label && 'labels' in pkg) {
+      const labelMatch = pkg.labels?.some(label => 
+        label.toLowerCase().includes(filters.label!.toLowerCase())
+      );
+      if (!labelMatch) return false;
+    }
+
+    return true;
+  }
+
   async searchPackages(query: string): Promise<SearchResult[]> {
     if (!query || query.trim().length === 0) {
       throw new Error("Please provide a search query.");
@@ -160,19 +240,19 @@ class PackageService {
 
     const channelData = await this.fetchChannelData();
     const results: SearchResult[] = [];
-    const searchTerm = query.trim();
+    const filters = this.parseSearchQuery(query.trim());
 
-    // Check if query is a regex pattern
-    const isRegexQuery = this.isRegexPattern(searchTerm);
+    // Check if the text query is a regex pattern
+    const isRegexQuery = filters.textQuery ? this.isRegexPattern(filters.textQuery) : false;
     let regexPattern: RegExp | null = null;
 
-    if (isRegexQuery) {
+    if (isRegexQuery && filters.textQuery) {
       try {
         // Remove surrounding slashes if present
-        const cleanPattern = searchTerm.replace(/^\/|\/$/g, "");
+        const cleanPattern = filters.textQuery.replace(/^\/|\/$/g, "");
         regexPattern = new RegExp(cleanPattern, "i"); // Case insensitive
       } catch (error) {
-        throw new Error(`Invalid regex pattern: ${searchTerm}`);
+        throw new Error(`Invalid regex pattern: ${filters.textQuery}`);
       }
     }
 
@@ -185,16 +265,36 @@ class PackageService {
           continue;
         }
 
-        const relevanceScore = this.calculateRelevance(
-          pkg.name,
-          pkg.description,
-          searchTerm,
-          regexPattern,
-        );
+        // First check if it matches the filters
+        if (!this.matchesFilters(pkg, filters)) {
+          continue;
+        }
+
+        let relevanceScore = 0;
+
+        // If there's a text query, calculate relevance for it
+        if (filters.textQuery) {
+          relevanceScore = this.calculateRelevance(
+            pkg.name,
+            pkg.description,
+            filters.textQuery,
+            regexPattern,
+          );
+        } else {
+          // If no text query but filters match, give a base score
+          relevanceScore = 20;
+        }
+
+        // Boost score for filter matches
+        if (filters.author) {
+          relevanceScore += 30;
+        }
+        if (filters.label) {
+          relevanceScore += 25;
+        }
 
         if (relevanceScore > 0) {
-          const latestRelease =
-            pkg.releases.length > 0 ? pkg.releases[0] : null;
+          const latestRelease = this.getLatestRelease(pkg.releases);
 
           results.push({
             name: pkg.name,
@@ -222,16 +322,33 @@ class PackageService {
           continue;
         }
 
-        const relevanceScore = this.calculateRelevance(
-          lib.name,
-          lib.description,
-          searchTerm,
-          regexPattern,
-        );
+        // First check if it matches the filters
+        if (!this.matchesFilters(lib, filters)) {
+          continue;
+        }
+
+        let relevanceScore = 0;
+
+        // If there's a text query, calculate relevance for it
+        if (filters.textQuery) {
+          relevanceScore = this.calculateRelevance(
+            lib.name,
+            lib.description,
+            filters.textQuery,
+            regexPattern,
+          );
+        } else {
+          // If no text query but filters match, give a base score
+          relevanceScore = 20;
+        }
+
+        // Boost score for filter matches
+        if (filters.author) {
+          relevanceScore += 30;
+        }
 
         if (relevanceScore > 0) {
-          const latestRelease =
-            lib.releases.length > 0 ? lib.releases[0] : null;
+          const latestRelease = this.getLatestRelease(lib.releases);
 
           results.push({
             name: lib.name,
@@ -354,15 +471,27 @@ class PackageService {
 function createSearchResultsEmbeds(
   query: string,
   results: SearchResult[],
+  filters: SearchFilters,
   isRegex: boolean = false,
 ) {
+  // Create filter description
+  const filterParts: string[] = [];
+  if (filters.author) filterParts.push(`**Author:** ${filters.author}`);
+  if (filters.label) filterParts.push(`**Label:** ${filters.label}`);
+  
+  const filterText = filterParts.length > 0 
+    ? `\n**Active Filters:** ${filterParts.join(', ')}`
+    : '';
+
   if (results.length === 0) {
     const searchType = isRegex ? "regex pattern" : "query";
+    const queryText = filters.textQuery || "filter-only search";
+    
     return [
       {
-        title: `🔍 No Results for ${searchType} "${query}"`,
+        title: `🔍 No Results`,
         color: 0xe74c3c,
-        description: `No packages found matching ${searchType} "${query}". Try a different search term.`,
+        description: `No packages found matching ${searchType} "${queryText}"${filterText}\n\nTry:\n• Different search terms\n• \`author:username\` to filter by author\n• \`label:labelname\` to filter by label\n• Combine filters: \`author:FichteFoll label:snippets Package\``,
         footer: {
           text: "Package Control Search",
         },
@@ -372,23 +501,23 @@ function createSearchResultsEmbeds(
   }
 
   // Check for exact name match (only for non-regex queries)
-  const exactMatch = !isRegex
+  const exactMatch = !isRegex && filters.textQuery
     ? results.find(
-        (result) => result.name.toLowerCase() === query.toLowerCase(),
+        (result) => result.name.toLowerCase() === filters.textQuery.toLowerCase(),
       )
     : null;
 
   // If exact match exists, show only that one
   const resultsToShow = exactMatch ? [exactMatch] : results.slice(0, 3);
 
-  return resultsToShow.map((result) => {
+  const embeds = resultsToShow.map((result) => {
     const authorText = Array.isArray(result.author)
       ? result.author.join(", ")
       : result.author || "Unknown";
 
     const embed = {
       description: result.description || "No description available",
-      color: null,
+      color: 0x3498db,
       fields: [] as Array<{
         name: string;
         value: string;
@@ -445,6 +574,58 @@ function createSearchResultsEmbeds(
 
     return embed;
   });
+
+  // Add filter info to the first embed if filters are active
+  if (filterParts.length > 0 && embeds.length > 0) {
+    embeds[0].description = `${filterText}\n\n${embeds[0].description}`;
+  }
+
+  return embeds;
+}
+
+// Create help embed
+function createHelpEmbed() {
+  return {
+    title: "📖 Package Control Search Help",
+    color: 0x9b59b6,
+    description: "Search through Sublime Text packages and libraries with powerful filters and queries.",
+    fields: [
+      {
+        name: "🔍 Basic Search",
+        value: "`/packages LSP` - Search for packages containing 'LSP'",
+        inline: false,
+      },
+      {
+        name: "👤 Author Filter",
+        value: "`/packages author:FichteFoll` - Find packages by specific author\n`/packages author:FichteFoll Package` - Combine with text search",
+        inline: false,
+      },
+      {
+        name: "🏷️ Label Filter", 
+        value: "`/packages label:snippets` - Find packages with specific label\n`/packages label:lsp completion` - Combine with text search",
+        inline: false,
+      },
+      {
+        name: "🔧 Advanced Search",
+        value: "`/packages author:FichteFoll label:syntax theme` - Multiple filters + text",
+        inline: false,
+      },
+      {
+        name: "🔀 Regex Search",
+        value: "`/packages /^LSP/` - Use regex patterns (wrap in forward slashes)",
+        inline: false,
+      },
+      {
+        name: "📊 Other Commands",
+        value: "`/stats` - View package database statistics",
+        inline: false,
+      },
+    ],
+    footer: {
+      text: "Package Control Search • Case-insensitive matching",
+    },
+    timestamp: new Date().toISOString(),
+  };
 }
 
 // Create stats embed
@@ -509,18 +690,9 @@ async function handleDiscordInteraction(
 
       try {
         const results = await packageService.searchPackages(query);
-
-        if (results.length === 0) {
-          return {
-            type: INTERACTION_RESPONSE_TYPE.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              content: `No packages found matching "${query}". Try a different search term.`,
-            },
-          };
-        }
-
-        const isRegex = packageService.isRegexPattern(query);
-        const embeds = createSearchResultsEmbeds(query, results, isRegex);
+        const filters = packageService.parseSearchQuery(query.trim());
+        const isRegex = filters.textQuery ? packageService.isRegexPattern(filters.textQuery) : false;
+        const embeds = createSearchResultsEmbeds(query, results, filters, isRegex);
 
         return {
           type: INTERACTION_RESPONSE_TYPE.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -541,6 +713,16 @@ async function handleDiscordInteraction(
           },
         };
       }
+    }
+
+    if (commandName === "help") {
+      const embed = createHelpEmbed();
+      return {
+        type: INTERACTION_RESPONSE_TYPE.CHANNEL_MESSAGE_WITH_SOURCE,
+        data: {
+          embeds: [embed],
+        },
+      };
     }
 
     if (commandName === "stats") {
