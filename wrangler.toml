@@ -3,6 +3,8 @@ main = "src/worker.ts"
 compatibility_date = "2024-01-15"
 compatibility_flags = ["nodejs_compat"]
 
+routes = [{ pattern = "bot.sublimetext.io", custom_domain = true }]
+
 [env.production]
 name = "sublime-packages-discord-bot"
 
@@ -11,4 +13,8 @@ name = "sublime-packages-discord-bot"
 # These are non-sensitive variables
 DISCORD_APPLICATION_ID = "1391144013045694515"
 
-routes = [{ pattern = "bot.sublimetext.io", custom_domain = true }]
+# KV Namespace for storing search results
+[[kv_namespaces]]
+binding = "PACKAGE_CACHE"
+id = "cdf5b4b7f93f463f9cdd6a523848defc"
+preview_id = "fc13076b20394c21b5ef4e01cfb4b72e"

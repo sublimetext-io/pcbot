@@ -13,6 +13,8 @@ interface DiscordInteraction {
       type: number;
       value: string;
     }>;
+    custom_id?: string;
+    values?: string[];
   };
   channel_id: string;
   token: string;
@@ -49,6 +51,20 @@ interface DiscordResponse {
       };
     }>;
     flags?: number;
+    components?: Array<{
+      type: number;
+      components: Array<{
+        type: number;
+        custom_id: string;
+        label?: string;
+        style?: number;
+        options?: Array<{
+          label: string;
+          value: string;
+          description?: string;
+        }>;
+      }>;
+    }>;
   };
 }
 
@@ -116,12 +132,20 @@ interface SearchResult {
 const INTERACTION_TYPE = {
   PING: 1,
   APPLICATION_COMMAND: 2,
+  MESSAGE_COMPONENT: 3,
 };
 
 const INTERACTION_RESPONSE_TYPE = {
   PONG: 1,
   CHANNEL_MESSAGE_WITH_SOURCE: 4,
   DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: 5,
+  UPDATE_MESSAGE: 7,
+};
+
+const COMPONENT_TYPE = {
+  ACTION_ROW: 1,
+  BUTTON: 2,
+  SELECT_MENU: 3,
 };
 
 // Environment variables interface
@@ -129,6 +153,7 @@ interface Env {
   DISCORD_PUBLIC_KEY: string;
   DISCORD_TOKEN: string;
   DISCORD_APPLICATION_ID: string;
+  PACKAGE_CACHE: KVNamespace;
 }
 
 // Advanced search filter interface
@@ -141,6 +166,8 @@ interface SearchFilters {
 class PackageService {
   private static readonly CHANNEL_URL =
     "https://github.com/packagecontrol/thecrawl/releases/download/the-channel/channel.json";
+
+  constructor(private env: Env) {}
 
   async fetchChannelData(): Promise<ChannelData> {
     try {
@@ -465,14 +492,166 @@ class PackageService {
 
     return { packages: packageCount, libraries: libraryCount };
   }
+
+  async storeSearchResults(searchId: string, results: SearchResult[]): Promise<void> {
+    // Store results in KV with 15-minute expiration (Discord component timeout)
+    await this.env.PACKAGE_CACHE.put(
+      `search_${searchId}`,
+      JSON.stringify(results),
+      { expirationTtl: 900 } // 15 minutes
+    );
+  }
+
+  async getSearchResults(searchId: string): Promise<SearchResult[] | null> {
+    const data = await this.env.PACKAGE_CACHE.get(`search_${searchId}`);
+    return data ? JSON.parse(data) : null;
+  }
+
+  async getPackageDetails(packageName: string, repository: string): Promise<Package | Library | null> {
+    const channelData = await this.fetchChannelData();
+    
+    // Search in packages
+    for (const [repo, packages] of Object.entries(channelData.packages_cache)) {
+      if (repo === repository) {
+        const pkg = packages.find(p => p.name === packageName);
+        if (pkg) return pkg;
+      }
+    }
+    
+    // Search in libraries
+    for (const [repo, libraries] of Object.entries(channelData.libraries_cache)) {
+      if (repo === repository) {
+        const lib = libraries.find(l => l.name === packageName);
+        if (lib) return lib;
+      }
+    }
+    
+    return null;
+  }
 }
 
-// Create search results embeds (returns array of embeds)
+// Create detailed package embed with full information
+function createPackageDetailEmbed(pkg: Package | Library, result: SearchResult): any {
+  const authorText = Array.isArray(pkg.author) ? pkg.author.join(", ") : pkg.author;
+  const isPackage = 'labels' in pkg;
+
+  const embed = {
+    title: `${pkg.name} by ${authorText}`,
+    description: pkg.description || "No description available",
+    color: isPackage ? 0x3498db : 0xe67e22,
+    fields: [] as Array<{
+      name: string;
+      value: string;
+      inline?: boolean;
+    }>,
+    author: {
+      name: isPackage ? "📦 Package" : "📚 Library",
+      icon_url: "https://packages.sublimetext.io/static/logo.webp",
+    },
+    footer: {
+      text: "Package Control Search",
+    },
+    timestamp: pkg.last_modified || new Date().toISOString(),
+  };
+
+  // Add Latest Version field
+  if (result.latest_version) {
+    embed.fields.push({
+      name: "Latest Version",
+      value: result.latest_version,
+      inline: true,
+    });
+  }
+
+  // Add Type field
+  embed.fields.push({
+    name: "Type",
+    value: isPackage ? "📦 Package" : "📚 Library",
+    inline: true,
+  });
+
+  // Add Repository field
+  if (result.repository) {
+    embed.fields.push({
+      name: "Repository",
+      value: result.repository,
+      inline: true,
+    });
+  }
+
+  // Add Labels field (packages only)
+  if (isPackage && pkg.labels && pkg.labels.length > 0) {
+    embed.fields.push({
+      name: "Labels",
+      value: pkg.labels.join(", "),
+      inline: false,
+    });
+  }
+
+  // Add Previous Names field (packages only)
+  if (isPackage && pkg.previous_names && pkg.previous_names.length > 0) {
+    embed.fields.push({
+      name: "Previous Names",
+      value: pkg.previous_names.join(", "),
+      inline: false,
+    });
+  }
+
+  // Add Homepage field
+  if (result.homepage) {
+    embed.fields.push({
+      name: "Homepage",
+      value: result.homepage,
+      inline: false,
+    });
+  }
+
+  // Add Issues field
+  if (pkg.issues) {
+    embed.fields.push({
+      name: "Issues",
+      value: pkg.issues,
+      inline: false,
+    });
+  }
+
+  // Add Readme field (packages only)
+  if (isPackage && pkg.readme) {
+    embed.fields.push({
+      name: "Documentation",
+      value: pkg.readme,
+      inline: false,
+    });
+  }
+
+  // Add Donate field (packages only)
+  if (isPackage && pkg.donate) {
+    embed.fields.push({
+      name: "Support",
+      value: pkg.donate,
+      inline: true,
+    });
+  }
+
+  // Add Buy field (packages only)
+  if (isPackage && pkg.buy) {
+    embed.fields.push({
+      name: "Purchase",
+      value: pkg.buy,
+      inline: true,
+    });
+  }
+
+  return embed;
+}
+
+// Create search results embeds with interactive components
 function createSearchResultsEmbeds(
   query: string,
   results: SearchResult[],
   filters: SearchFilters,
   isRegex: boolean = false,
+  userId?: string,
 ) {
   // Create filter description
   const filterParts: string[] = [];
@@ -487,8 +666,8 @@ function createSearchResultsEmbeds(
     const searchType = isRegex ? "regex pattern" : "query";
     const queryText = filters.textQuery || "filter-only search";
     
-    return [
-      {
+    return {
+      embeds: [{
         title: `🔍 No Results`,
         color: 0xe74c3c,
         description: `No packages found matching ${searchType} "${queryText}"${filterText}\n\nTry:\n• Different search terms\n• \`author:username\` to filter by author\n• \`label:labelname\` to filter by label\n• Combine filters: \`author:FichteFoll label:snippets Package\``,
@@ -496,8 +675,9 @@ function createSearchResultsEmbeds(
           text: "Package Control Search",
         },
         timestamp: new Date().toISOString(),
-      },
-    ];
+      }],
+      components: []
+    };
   }
 
   // Check for exact name match (only for non-regex queries)
@@ -580,7 +760,152 @@ function createSearchResultsEmbeds(
     embeds[0].description = `${filterText}\n\n${embeds[0].description}`;
   }
 
-  return embeds;
+  // Create interactive components if we have multiple results
+  const components: Array<{
+    type: number;
+    components: Array<{
+      type: number;
+      custom_id: string;
+      label?: string;
+      style?: number;
+      options?: Array<{
+        label: string;
+        value: string;
+        description?: string;
+      }>;
+    }>;
+  }> = [];
+  
+  if (results.length > 1) {
+    // Generate a shorter, more reliable search ID with user prefix
+    const searchId = `${userId ? userId.substring(0, 8) : 'anon'}_${Math.random().toString(36).substring(2, 15)}`;
+    
+    // Create select menu with package options
+    const selectMenu = {
+      type: COMPONENT_TYPE.ACTION_ROW,
+      components: [{
+        type: COMPONENT_TYPE.SELECT_MENU,
+        custom_id: `package_select_${searchId}`,
+        placeholder: `Select a package to view details (${results.length} found)`,
+        options: results.slice(0, 25).map((result, index) => ({
+          label: result.name,
+          value: `${result.name}|${result.repository}|${index}`,
+          description: `${Array.isArray(result.author) ? result.author.join(", ") : result.author} - ${result.description?.substring(0, 50)}...`,
+        })),
+      }],
+    };
+    components.push(selectMenu);
+
+    // Store the search ID for later retrieval
+    return { embeds, components, searchId };
+  }
+
+  return { embeds, components };
+}
+
+// Create a single embed that can be updated with package details
+function createUpdatableSearchEmbed(
+  query: string,
+  results: SearchResult[],
+  filters: SearchFilters,
+  selectedIndex?: number
+) {
+  // Create filter description
+  const filterParts: string[] = [];
+  if (filters.author) filterParts.push(`**Author:** ${filters.author}`);
+  if (filters.label) filterParts.push(`**Label:** ${filters.label}`);
+  
+  const filterText = filterParts.length > 0 
+    ? `\n**Active Filters:** ${filterParts.join(', ')}`
+    : '';
+
+  if (results.length === 0) {
+    return {
+      title: `🔍 No Results`,
+      color: 0xe74c3c,
+      description: `No packages found matching "${query}"${filterText}\n\nTry:\n• Different search terms\n• \`author:username\` to filter by author\n• \`label:labelname\` to filter by label`,
+      footer: {
+        text: "Package Control Search",
+      },
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  // If a specific package is selected, show its details
+  if (selectedIndex !== undefined && results[selectedIndex]) {
+    const result = results[selectedIndex];
+    const authorText = Array.isArray(result.author)
+      ? result.author.join(", ")
+      : result.author || "Unknown";
+
+    return {
+      title: `${result.name} by ${authorText}`,
+      description: result.description || "No description available",
+      color: result.type === "package" ? 0x3498db : 0xe67e22,
+      fields: [
+        ...(result.latest_version ? [{
+          name: "Latest Version",
+          value: result.latest_version,
+          inline: true,
+        }] : []),
+        {
+          name: "Type",
+          value: result.type === "package" ? "📦 Package" : "📚 Library",
+          inline: true,
+        },
+        ...(result.repository ? [{
+          name: "Repository",
+          value: result.repository,
+          inline: true,
+        }] : []),
+        ...(result.labels && result.labels.length > 0 ? [{
+          name: "Labels",
+          value: result.labels.join(", "),
+          inline: false,
+        }] : []),
+        ...(result.homepage ? [{
+          name: "Homepage",
+          value: result.homepage,
+          inline: false,
+        }] : []),
+        ...(result.issues ? [{
+          name: "Issues",
+          value: result.issues,
+          inline: false,
+        }] : []),
+      ],
+      author: {
+        name: result.type === "package" ? "📦 Package" : "📚 Library",
+        url: result.homepage || `https://packages.sublimetext.io/packages/${result.name}/`,
+        icon_url: "https://packages.sublimetext.io/static/logo.webp",
+      },
+      footer: {
+        text: `Showing ${selectedIndex + 1} of ${results.length} results`,
+      },
+      timestamp: result.last_modified || new Date().toISOString(),
+    };
+  }
+
+  // Show overview of all results
+  const resultCount = results.length;
+  const topResults = results.slice(0, 5);
+  
+  const resultList = topResults.map((result, index) => {
+    const authorText = Array.isArray(result.author)
+      ? result.author.join(", ")
+      : result.author || "Unknown";
+    return `${index + 1}. **${result.name}** by ${authorText}\n   ${result.description?.substring(0, 100)}...`;
+  }).join('\n\n');
+
+  return {
+    title: `🔍 Search Results for "${query}"`,
+    description: `${filterText}\n\n**Found ${resultCount} packages:**\n\n${resultList}${resultCount > 5 ? `\n\n...and ${resultCount - 5} more` : ''}`,
+    color: 0x3498db,
+    footer: {
+      text: "Use the dropdown below to view detailed information",
+    },
+    timestamp: new Date().toISOString(),
+  };
 }
 
 // Create help embed
@@ -660,8 +985,9 @@ function createStatsEmbed(stats: { packages: number; libraries: number }) {
 // Handle Discord interactions
 async function handleDiscordInteraction(
   interaction: DiscordInteraction,
+  env: Env,
 ): Promise<DiscordResponse> {
-  const packageService = new PackageService();
+  const packageService = new PackageService(env);
 
   if (interaction.type === INTERACTION_TYPE.PING) {
     return {
@@ -692,12 +1018,63 @@ async function handleDiscordInteraction(
         const results = await packageService.searchPackages(query);
         const filters = packageService.parseSearchQuery(query.trim());
         const isRegex = filters.textQuery ? packageService.isRegexPattern(filters.textQuery) : false;
-        const embeds = createSearchResultsEmbeds(query, results, filters, isRegex);
+        
+        // Get user ID for user-specific search results
+        const userId = interaction.member?.user?.id;
+        const response = createSearchResultsEmbeds(query, results, filters, isRegex, userId);
+
+        // Store results for interactive selection
+        if (results.length > 1 && response.searchId) {
+          console.log(`Storing search results with ID: ${response.searchId} for user: ${userId}`);
+          await packageService.storeSearchResults(response.searchId, results);
+        }
+
+        // If we have multiple results, show the first package directly with navigation
+        if (results.length > 1) {
+          const firstPackageEmbed = createUpdatableSearchEmbed(query, results, filters, 0);
+          
+          const navigationComponents = [
+            {
+              type: COMPONENT_TYPE.ACTION_ROW,
+              components: [
+                {
+                  type: COMPONENT_TYPE.BUTTON,
+                  custom_id: `prev_package_${response.searchId}_0`,
+                  label: "← Previous",
+                  style: 2, // Secondary button
+                  disabled: true, // First package, so previous is disabled
+                },
+                {
+                  type: COMPONENT_TYPE.BUTTON,
+                  custom_id: `next_package_${response.searchId}_0`,
+                  label: "Next →",
+                  style: 2, // Secondary button
+                  disabled: results.length === 1,
+                },
+                {
+                  type: COMPONENT_TYPE.BUTTON,
+                  custom_id: `package_list_${response.searchId}`,
+                  label: "📋 All Packages",
+                  style: 1, // Primary button
+                },
+              ],
+            },
+          ];
+
+          return {
+            type: INTERACTION_RESPONSE_TYPE.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              embeds: [firstPackageEmbed],
+              components: navigationComponents,
+            },
+          };
+        }
 
         return {
           type: INTERACTION_RESPONSE_TYPE.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            embeds: embeds,
+            embeds: response.embeds,
+            components: response.components,
           },
         };
       } catch (error) {
@@ -721,6 +1098,7 @@ async function handleDiscordInteraction(
         type: INTERACTION_RESPONSE_TYPE.CHANNEL_MESSAGE_WITH_SOURCE,
         data: {
           embeds: [embed],
+          components: [],
         },
       };
     }
@@ -734,6 +1112,7 @@ async function handleDiscordInteraction(
           type: INTERACTION_RESPONSE_TYPE.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
             embeds: [embed],
+            components: [],
           },
         };
       } catch (error) {
@@ -747,6 +1126,223 @@ async function handleDiscordInteraction(
         };
       }
     }
+  }
+
+  if (interaction.type === INTERACTION_TYPE.MESSAGE_COMPONENT) {
+    const customId = interaction.data?.custom_id;
+    
+    if (customId?.startsWith('package_select_')) {
+      const selectedValue = interaction.data?.values?.[0];
+      
+      if (selectedValue) {
+        const [packageName, repository, indexStr] = selectedValue.split('|');
+        const index = parseInt(indexStr);
+        
+        try {
+          // Extract search ID more reliably
+          const searchId = customId.replace('package_select_', '');
+          console.log(`Retrieving search results with ID: ${searchId}`);
+          
+          const results = await packageService.getSearchResults(searchId);
+          
+          if (!results || !results[index]) {
+            console.log(`No results found for search ID: ${searchId}, index: ${index}`);
+            return {
+              type: INTERACTION_RESPONSE_TYPE.UPDATE_MESSAGE,
+              data: {
+                embeds: [{
+                  title: "❌ Error",
+                  description: "Search results have expired or are no longer available. Please search again.",
+                  color: 0xe74c3c,
+                  footer: {
+                    text: "Package Control Search",
+                  },
+                  timestamp: new Date().toISOString(),
+                }],
+                components: [],
+              },
+            };
+          }
+
+          // Create updated embed with the selected package details
+          const filters = packageService.parseSearchQuery(""); // Empty for now
+          const updatedEmbed = createUpdatableSearchEmbed("", results, filters, index);
+
+          // Create navigation buttons
+          const navigationComponents = [
+            {
+              type: COMPONENT_TYPE.ACTION_ROW,
+              components: [
+                {
+                  type: COMPONENT_TYPE.BUTTON,
+                  custom_id: `prev_package_${searchId}_${index}`,
+                  label: "← Previous",
+                  style: 2, // Secondary button
+                  disabled: index === 0,
+                },
+                {
+                  type: COMPONENT_TYPE.BUTTON,
+                  custom_id: `next_package_${searchId}_${index}`,
+                  label: "Next →",
+                  style: 2, // Secondary button
+                  disabled: index === results.length - 1,
+                },
+                {
+                  type: COMPONENT_TYPE.BUTTON,
+                  custom_id: `package_list_${searchId}`,
+                  label: "📋 All Packages",
+                  style: 1, // Primary button
+                },
+              ],
+            },
+          ];
+
+          return {
+            type: INTERACTION_RESPONSE_TYPE.UPDATE_MESSAGE,
+            data: {
+              embeds: [updatedEmbed],
+              components: navigationComponents,
+            },
+          };
+        } catch (error) {
+          console.error("Error handling package selection:", error);
+          return {
+            type: INTERACTION_RESPONSE_TYPE.UPDATE_MESSAGE,
+            data: {
+              embeds: [{
+                title: "❌ Error",
+                description: "An error occurred while retrieving package details.",
+                color: 0xe74c3c,
+                footer: {
+                  text: "Package Control Search",
+                },
+                timestamp: new Date().toISOString(),
+              }],
+              components: [],
+            },
+          };
+        }
+      }
+    }
+
+    // Handle navigation buttons
+    if (customId?.startsWith('prev_package_') || customId?.startsWith('next_package_')) {
+      // Extract search ID and index from custom_id format: prev_package_12345678_abc123def_0
+      const prefix = customId.startsWith('prev_package_') ? 'prev_package_' : 'next_package_';
+      const remaining = customId.replace(prefix, '');
+      const lastUnderscoreIndex = remaining.lastIndexOf('_');
+      const searchId = remaining.substring(0, lastUnderscoreIndex);
+      const currentIndex = parseInt(remaining.substring(lastUnderscoreIndex + 1));
+      const newIndex = customId.startsWith('prev_package_') ? currentIndex - 1 : currentIndex + 1;
+      
+      console.log(`Navigation: customId=${customId}, searchId=${searchId}, currentIndex=${currentIndex}, newIndex=${newIndex}`);
+      
+      const results = await packageService.getSearchResults(searchId);
+      if (!results || !results[newIndex]) {
+        return {
+          type: INTERACTION_RESPONSE_TYPE.UPDATE_MESSAGE,
+          data: {
+            embeds: [{
+              title: "❌ Error",
+              description: "Search results have expired. Please search again.",
+              color: 0xe74c3c,
+              footer: { text: "Package Control Search" },
+              timestamp: new Date().toISOString(),
+            }],
+            components: [],
+          },
+        };
+      }
+
+      const filters = packageService.parseSearchQuery("");
+      const updatedEmbed = createUpdatableSearchEmbed("", results, filters, newIndex);
+
+      const navigationComponents = [
+        {
+          type: COMPONENT_TYPE.ACTION_ROW,
+          components: [
+            {
+              type: COMPONENT_TYPE.BUTTON,
+              custom_id: `prev_package_${searchId}_${newIndex}`,
+              label: "← Previous",
+              style: 2,
+              disabled: newIndex === 0,
+            },
+            {
+              type: COMPONENT_TYPE.BUTTON,
+              custom_id: `next_package_${searchId}_${newIndex}`,
+              label: "Next →",
+              style: 2,
+              disabled: newIndex === results.length - 1,
+            },
+            {
+              type: COMPONENT_TYPE.BUTTON,
+              custom_id: `package_list_${searchId}`,
+              label: "📋 All Packages",
+              style: 1,
+            },
+          ],
+        },
+      ];
+
+      return {
+        type: INTERACTION_RESPONSE_TYPE.UPDATE_MESSAGE,
+        data: {
+          embeds: [updatedEmbed],
+          components: navigationComponents,
+        },
+      };
+    }
+
+    if (customId?.startsWith('package_list_')) {
+      const searchId = customId.replace('package_list_', '');
+      const results = await packageService.getSearchResults(searchId);
+      
+      if (!results) {
+        return {
+          type: INTERACTION_RESPONSE_TYPE.UPDATE_MESSAGE,
+          data: {
+            embeds: [{
+              title: "❌ Error",
+              description: "Search results have expired. Please search again.",
+              color: 0xe74c3c,
+              footer: { text: "Package Control Search" },
+              timestamp: new Date().toISOString(),
+            }],
+            components: [],
+          },
+        };
+      }
+
+      // Show overview with dropdown
+      const filters = packageService.parseSearchQuery("");
+      const overviewEmbed = createUpdatableSearchEmbed("", results, filters);
+      
+      // Recreate the select menu
+      const selectMenu = {
+        type: COMPONENT_TYPE.ACTION_ROW,
+        components: [{
+          type: COMPONENT_TYPE.SELECT_MENU,
+          custom_id: `package_select_${searchId}`,
+          placeholder: `Select a package to view details (${results.length} found)`,
+          options: results.slice(0, 25).map((result, index) => ({
+            label: result.name,
+            value: `${result.name}|${result.repository}|${index}`,
+            description: `${Array.isArray(result.author) ? result.author.join(", ") : result.author} - ${result.description?.substring(0, 50)}...`,
+          })),
+        }],
+      };
+
+      return {
+        type: INTERACTION_RESPONSE_TYPE.UPDATE_MESSAGE,
+        data: {
+          embeds: [overviewEmbed],
+          components: [selectMenu],
+        },
+      };
+    }
+
+
   }
 
   return {
@@ -794,7 +1390,7 @@ export default {
       const interaction: DiscordInteraction = JSON.parse(body);
 
       // Handle interaction
-      const response = await handleDiscordInteraction(interaction);
+      const response = await handleDiscordInteraction(interaction, env);
 
       return new Response(JSON.stringify(response), {
         headers: {
